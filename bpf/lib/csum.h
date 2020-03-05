@@ -17,6 +17,11 @@ struct csum_offset
 	__u16 flags;
 };
 
+static __always_inline int csum_diff_small(__u32 from, __u32 to, __u32 seed)
+{
+	return csum_diff(&from, sizeof(from), &to, sizeof(to), seed);
+}
+
 /**
  * Determins the L4 checksum field offset and required flags
  * @arg nexthdr	L3 nextheader field
@@ -62,7 +67,8 @@ static __always_inline int csum_l4_replace(struct __ctx_buff *ctx, int l4_off,
 					   struct csum_offset *csum,
 					   __be32 from, __be32 to, int flags)
 {
-	return l4_csum_replace(ctx, l4_off + csum->offset, from, to, flags | csum->flags);
+	return l4_csum_replace(ctx, l4_off + csum->offset, 0,
+			       csum_diff_small(from, to, 0), flags | csum->flags);
 }
 
 #endif /* __LB_H_ */
