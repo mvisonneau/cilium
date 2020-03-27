@@ -151,6 +151,8 @@ func reportCreateVMFailure(vm string, err error) {
 }
 
 var _ = BeforeAll(func() {
+	helpers.CiliumLatestImageVersion = config.CiliumTestConfig.UpdateTestImageTag
+
 	go func() {
 		defer GinkgoRecover()
 		time.Sleep(config.CiliumTestConfig.Timeout)
