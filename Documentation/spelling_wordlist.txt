@@ -204,6 +204,7 @@ cli
 cls
 clustermesh
 cni
+cnp
 codebase
 conf
 config
