@@ -1,4 +1,4 @@
-// Copyright 2017-2019 Authors of Cilium
+// Copyright 2017-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -439,6 +439,75 @@ var _ = Describe("K8sServicesTest", func() {
 			doRequestsFromThirdHostWithLocalPort(url, count, checkSourceIP, 0)
 		}
 
+		// srcPod:      Name of pod sending the datagram
+		// srcIP:       IPv4 of pod sending the datagram
+		// node:        Node where to search the CT table
+		// dstPodIP:    Receiver pod IP (for checking in CT table)
+		// dstPodPort:  Receiver pod port (for checking in CT table)
+		// dstIP:       Target endpoint IP for sending the datagram
+		// dstPort:     Target endpoint port for sending the datagram
+		// withLB:      Load balancer in use, send n datagrams
+		doFragmentedRequest := func(srcPod string, srcIP string, node string, dstPodIP string, dstPodPort int, dstIP string, dstPort int32, withLB bool) {
+			var (
+				blockSize  = 512
+				blockCount = 10
+				srcPort    = 12345
+			)
+			ciliumPod, err := kubectl.GetCiliumPodOnNode(helpers.CiliumNamespace, node)
+			Expect(err).Should(BeNil(), fmt.Sprintf("Cannot determine cilium pod name"))
+
+			// Get initial number of packets for the flow we test
+			// from conntrack table. The flow is probably not in
+			// the table the first time we check, so do not stop if
+			// Atoi() throws an error and simply consider we have 0
+			// packets.
+
+			// Field #7 is "RxPackets=<n>"
+			cmdIn := fmt.Sprintf("cilium bpf ct list global | awk '/UDP IN %s:%d -> %s:%d/ { sub(\".*=\",\"\", $7); print $7 }'", srcIP, srcPort, dstPodIP, dstPodPort)
+			resIn := kubectl.CiliumExec(ciliumPod, cmdIn)
+			countIn, _ := strconv.Atoi(strings.TrimSpace(resIn.GetStdOut()))
+
+			// Field #11 is "TxPackets=<n>"
+			cmdOut := fmt.Sprintf("cilium bpf ct list global | awk '/UDP OUT %s:%d -> %s:%d/ { sub(\".*=\",\"\", $11); print $11 }'", srcIP, srcPort, dstPodIP, dstPodPort)
+			resOut := kubectl.CiliumExec(ciliumPod, cmdOut)
+			countOut, _ := strconv.Atoi(strings.TrimSpace(resOut.GetStdOut()))
+
+			By("Sending a fragmented packet from %s to endpoint %s:%d", srcPod, dstIP, dstPort)
+			cmd := fmt.Sprintf("dd if=/dev/zero bs=%d count=%d | nc -u -w 1 -p %d %s %d", blockSize, blockCount, srcPort, dstIP, dstPort)
+			// If load balancer in use, send two datagrams, to make
+			// sure the pod we check receives one.
+			if withLB {
+				cmd = fmt.Sprintf("for i in 1 2 ; do %s ; done", cmd)
+			}
+			cmd = fmt.Sprintf("bash -c '%s'", cmd)
+			res := kubectl.ExecPodCmd(helpers.DefaultNamespace, srcPod, cmd)
+			res.ExpectSuccess("Cannot send fragmented datagram: %s", res.CombineOutput())
+
+			// Let's compute the expected number of packets. First
+			// fragment holds 1416 bytes of data under standard
+			// conditions for temperature, pressure and MTU.
+			// Following ones do not have UDP header: up to 1424
+			// bytes of data.
+			delta := 1
+			if blockSize*blockCount >= 1416 {
+				delta += (blockSize*blockCount - 1416) / 1424
+				if (blockSize*blockCount-1416)%1424 != 0 {
+					delta++
+				}
+			}
+
+			// Check that the expected packets were processed
+			resIn = kubectl.CiliumExec(ciliumPod, cmdIn)
+			resIn.ExpectSuccess("Unable to find relevant conntrack entry (in)")
+			newCountIn, _ := strconv.Atoi(strings.TrimSpace(resIn.GetStdOut()))
+			Expect(newCountIn).To(Equal(countIn+delta), "Failed to account for IPv4 fragments (in)")
+
+			resOut = kubectl.CiliumExec(ciliumPod, cmdOut)
+			resOut.ExpectSuccess("Unable to find relevant conntrack entry (out)")
+			newCountOut, _ := strconv.Atoi(strings.TrimSpace(resOut.GetStdOut()))
+			Expect(newCountOut).To(Equal(countOut+delta), "Failed to account for IPv4 fragments (out)")
+		}
+
 		testNodePort := func(bpfNodePort bool) {
 			var data v1.Service
 			k8s1Name, k8s1IP := getNodeInfo(helpers.K8s1)
@@ -688,6 +757,77 @@ var _ = Describe("K8sServicesTest", func() {
 			doRequestsExpectingHTTPCode(url, count, "503", k8s2Name)
 		}
 
+		testIPv4FragmentSupport := func() {
+			var data v1.Service
+			k8s1Name, k8s1IP := getNodeInfo(helpers.K8s1)
+			k8s2Name, k8s2IP := getNodeInfo(helpers.K8s2)
+
+			waitPodsDs()
+
+			getPodOnNode := func(nodeName string, podFilter string) (string, string) {
+				var podName string
+				podsNodes, err := kubectl.GetPodsNodes(helpers.DefaultNamespace, fmt.Sprintf("-l %s", podFilter))
+				ExpectWithOffset(2, err).Should(BeNil(), "Cannot retrieve pods nodes with filter %q", podFilter)
+				Expect(podsNodes).ShouldNot(BeEmpty(), "No pod found in namespace %s with filter %q", helpers.DefaultNamespace, podFilter)
+				for pod, node := range podsNodes {
+					if node == nodeName {
+						podName = pod
+						break
+					}
+				}
+				ExpectWithOffset(2, podName).ShouldNot(BeEmpty(), "Cannot retrieve pod on node %s with filter %q", nodeName, podFilter)
+				podsIPs, err := kubectl.GetPodsIPs(helpers.DefaultNamespace, podFilter)
+				ExpectWithOffset(2, err).Should(BeNil(), "Cannot retrieve pods IPs with filter %q", podFilter)
+				Expect(podsIPs).ShouldNot(BeEmpty(), "No pod IP found in namespace %s with filter %q", helpers.DefaultNamespace, podFilter)
+				podIP := podsIPs[podName]
+				return podName, podIP
+			}
+
+			// Get testDSClient and testDS pods running on k8s1.
+			// This is because we search for new packets in the
+			// conntrack table for node k8s1.
+			clientPod, clientIP := getPodOnNode(helpers.K8s1, testDSClient)
+			_, serverIP := getPodOnNode(helpers.K8s1, testDS)
+
+			err := kubectl.Get(helpers.DefaultNamespace, "service test-nodeport").Unmarshal(&data)
+			Expect(err).Should(BeNil(), "Cannot retrieve service")
+			nodePort := data.Spec.Ports[1].NodePort
+
+			// TODO: We want TargetPort but it is of type
+			// intstr.IntOrString, so the following does not work.
+			// Not sure how to unwrap it.
+			//serverPort := data.Spec.Ports[1].TargetPort
+			serverPort := 69
+
+			// With ClusterIP
+			doFragmentedRequest(clientPod, clientIP, helpers.K8s1, serverIP, serverPort, data.Spec.ClusterIP, data.Spec.Ports[1].Port, true)
+
+			// From pod via node IPs
+			doFragmentedRequest(clientPod, clientIP, helpers.K8s1, serverIP, serverPort, k8s1IP, nodePort, true)
+			doFragmentedRequest(clientPod, clientIP, helpers.K8s1, serverIP, serverPort, "::ffff:"+k8s1IP, nodePort, true)
+			doFragmentedRequest(clientPod, clientIP, helpers.K8s1, serverIP, serverPort, k8s2IP, nodePort, true)
+			doFragmentedRequest(clientPod, clientIP, helpers.K8s1, serverIP, serverPort, "::ffff:"+k8s2IP, nodePort, true)
+
+			if helpers.RunsWithoutKubeProxy() {
+				localCiliumHostIPv4, err := kubectl.GetCiliumHostIPv4(context.TODO(), k8s1Name)
+				Expect(err).Should(BeNil(), "Cannot retrieve local cilium_host ipv4")
+				remoteCiliumHostIPv4, err := kubectl.GetCiliumHostIPv4(context.TODO(), k8s2Name)
+				Expect(err).Should(BeNil(), "Cannot retrieve remote cilium_host ipv4")
+
+				// From pod via loopback (host reachable services)
+				doFragmentedRequest(clientPod, clientIP, helpers.K8s1, serverIP, serverPort, "127.0.0.1", nodePort, true)
+				doFragmentedRequest(clientPod, clientIP, helpers.K8s1, serverIP, serverPort, "::ffff:127.0.0.1", nodePort, true)
+
+				// From pod via local cilium_host
+				doFragmentedRequest(clientPod, clientIP, helpers.K8s1, serverIP, serverPort, localCiliumHostIPv4, nodePort, true)
+				doFragmentedRequest(clientPod, clientIP, helpers.K8s1, serverIP, serverPort, "::ffff:"+localCiliumHostIPv4, nodePort, true)
+
+				// From pod via remote cilium_host
+				doFragmentedRequest(clientPod, clientIP, helpers.K8s1, serverIP, serverPort, remoteCiliumHostIPv4, nodePort, true)
+				doFragmentedRequest(clientPod, clientIP, helpers.K8s1, serverIP, serverPort, "::ffff:"+remoteCiliumHostIPv4, nodePort, true)
+			}
+		}
+
 		SkipItIf(helpers.RunsWithoutKubeProxy, "Tests NodePort (kube-proxy)", func() {
 			testNodePort(false)
 		})
@@ -846,6 +986,13 @@ var _ = Describe("K8sServicesTest", func() {
 					res.ExpectFail("NAT entry was not evicted")
 				})
 			})
+
+		// Net-next and not old versions, because of LRU requirement.
+		// TODO: Skip if no IPv4 or if fragment support is disabled
+		// instead (options disabled if no LRU support).
+		SkipItIf(helpers.DoesNotRunOnNetNext, "Supports IPv4 fragments", func() {
+			testIPv4FragmentSupport()
+		})
 	})
 
 	//TODO: Check service with IPV6
