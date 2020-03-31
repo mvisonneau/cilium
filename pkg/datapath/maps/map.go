@@ -1,4 +1,4 @@
-// Copyright 2016-2019 Authors of Cilium
+// Copyright 2016-2020 Authors of Cilium
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -161,6 +161,11 @@ func (ms *MapSweeper) RemoveDisabledMaps() {
 			"cilium_lb4_reverse_sk",
 			"cilium_snat_v4_external",
 			"cilium_proxy4"}...)
+	}
+
+	if !option.Config.EnableIPv4 {
+		maps = append(maps, []string{
+			"cilium_ipv4_frag_datagrams"}...)
 	}
 
 	// Can be removed with Cilium 1.8

@@ -34,6 +34,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/maps/eventsmap"
+	"github.com/cilium/cilium/pkg/maps/fragmap"
 	ipcachemap "github.com/cilium/cilium/pkg/maps/ipcache"
 	"github.com/cilium/cilium/pkg/maps/lxcmap"
 	"github.com/cilium/cilium/pkg/maps/metricsmap"
@@ -400,6 +401,10 @@ func (d *Daemon) initMaps() error {
 			option.Config.EnableIPv6); err != nil {
 			return err
 		}
+	}
+
+	if err := fragmap.InitMap(); err != nil {
+		return err
 	}
 
 	// Set up the list of IPCache listeners in the daemon, to be
