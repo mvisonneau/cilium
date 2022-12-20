@@ -289,14 +289,14 @@ func PrefixCeil(numIPs int, multiple int) int {
 }
 
 // PrefixToIps converts the given prefix to an array containing all IPs in the prefix / CIDR block.
-func PrefixToIps(prefixCidr string) ([]string, error) {
+func PrefixToIps(prefixCidr string, limit int) ([]string, error) {
 	var prefixIps []string
 	_, ipNet, err := net.ParseCIDR(prefixCidr)
 	if err != nil {
 		return prefixIps, err
 	}
 	netWithRange := ipNetToRange(*ipNet)
-	for ip := *netWithRange.First; !ip.Equal(*netWithRange.Last); ip = GetNextIP(ip) {
+	for ip := *netWithRange.First; !ip.Equal(*netWithRange.Last) || (limit > 0 && len(prefixIps) < limit); ip = GetNextIP(ip) {
 		prefixIps = append(prefixIps, ip.String())
 	}
 

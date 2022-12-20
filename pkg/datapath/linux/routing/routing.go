@@ -38,13 +38,6 @@ var (
 // info: The interface routing info used to create rules and routes.
 // mtu: The interface MTU.
 func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool) error {
-	if ip.To4() == nil {
-		log.WithFields(logrus.Fields{
-			"endpointIP": ip,
-		}).Warning("Unable to configure rules and routes because IP is not an IPv4 address")
-		return errors.New("IP not compatible")
-	}
-
 	ifindex, err := retrieveIfIndexFromMAC(info.MasterIfMAC, mtu)
 	if err != nil {
 		return fmt.Errorf("unable to find ifindex for interface MAC: %s", err)
@@ -53,6 +46,17 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool) error {
 	ipWithMask := net.IPNet{
 		IP:   ip,
 		Mask: net.CIDRMask(32, 32),
+	}
+
+	defaultRouteIP := net.IPv4zero
+	defaultRouteMask := net.CIDRMask(0, 32)
+	family := netlink.FAMILY_V4
+
+	if ip.To16() != nil {
+		ipWithMask.Mask = net.CIDRMask(128, 128)
+		defaultRouteIP = net.IPv6zero
+		defaultRouteMask = net.CIDRMask(0, 128)
+		family = netlink.FAMILY_V6
 	}
 
 	// On ingress, route all traffic to the endpoint IP via the main routing
@@ -78,7 +82,7 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool) error {
 	if info.Masquerade && info.IpamMode == ipamOption.IPAMENI {
 		// Lookup a VPC specific table for all traffic from an endpoint to the
 		// CIDR configured for the VPC on which the endpoint has the IP on.
-		for _, cidr := range info.IPv4CIDRs {
+		for _, cidr := range info.CIDRs {
 			if err := route.ReplaceRule(route.Rule{
 				Priority: egressPriority,
 				From:     &ipWithMask,
@@ -103,22 +107,32 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool) error {
 	//
 	// Note: This is a /32 route to avoid any L2. The endpoint does no L2
 	// either.
-	if err := netlink.RouteReplace(&netlink.Route{
+	nextHopRoute := &netlink.Route{
 		LinkIndex: ifindex,
-		Dst:       &net.IPNet{IP: info.IPv4Gateway, Mask: net.CIDRMask(32, 32)},
-		Scope:     netlink.SCOPE_LINK,
+		Dst:       &net.IPNet{IP: info.GatewayIP, Mask: ipWithMask.Mask},
 		Table:     tableID,
-	}); err != nil {
-		return fmt.Errorf("unable to add L2 nexthop route: %s", err)
+		Family:    family,
+	}
+
+	// Known issue: scope for IPv6 routes is not propagated correctly. If
+	// we set the scope here, lookup() will be unable to identify the route
+	// again and we will continuously re-add the route
+	if family == netlink.FAMILY_V4 {
+		nextHopRoute.Scope = netlink.SCOPE_LINK
+	}
+
+	if err := netlink.RouteReplace(nextHopRoute); err != nil {
+		return fmt.Errorf("unable to add L2 nexthop route: %s - %v+", err, *nextHopRoute)
 	}
 
 	// Default route to the VPC or subnet gateway
 	if err := netlink.RouteReplace(&netlink.Route{
-		Dst:   &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
-		Table: tableID,
-		Gw:    info.IPv4Gateway,
+		Dst:    &net.IPNet{IP: defaultRouteIP, Mask: defaultRouteMask},
+		Table:  tableID,
+		Family: family,
+		Gw:     info.GatewayIP,
 	}); err != nil {
-		return fmt.Errorf("unable to add L2 nexthop route: %s", err)
+		return fmt.Errorf("unable to add default route to the VPC/subnet gateway: %s", err)
 	}
 
 	return nil
@@ -145,15 +159,15 @@ func (info *RoutingInfo) Configure(ip net.IP, mtu int, compat bool) error {
 // one egress rule. Deletion of any rule only proceeds if the rule matches
 // the IP & priority. If more than one rule matches, then deletion is skipped.
 func Delete(ip net.IP, compat bool) error {
-	if ip.To4() == nil {
-		log.WithFields(logrus.Fields{
-			"endpointIP": ip,
-		}).Warning("Unable to delete rules because IP is not an IPv4 address")
-		return errors.New("IP not compatible")
-	}
 	ipWithMask := net.IPNet{
 		IP:   ip,
 		Mask: net.CIDRMask(32, 32),
+	}
+
+	family := netlink.FAMILY_V4
+	if ip.To16() != nil {
+		ipWithMask.Mask = net.CIDRMask(128, 128)
+		family = netlink.FAMILY_V6
 	}
 
 	scopedLog := log.WithFields(logrus.Fields{
@@ -181,10 +195,10 @@ func Delete(ip net.IP, compat bool) error {
 	// The condition here should mirror the conditions in Configure.
 	info := node.GetRouterInfo()
 	if info != nil && option.Config.EnableIPv4Masquerade && option.Config.IPAM == ipamOption.IPAMENI {
-		ipv4CIDRs := info.GetIPv4CIDRs()
-		cidrs := make([]*net.IPNet, 0, len(ipv4CIDRs))
-		for i := range ipv4CIDRs {
-			cidrs = append(cidrs, &ipv4CIDRs[i])
+		infoCIDRs := info.GetCIDRs()
+		cidrs := make([]*net.IPNet, 0, len(infoCIDRs))
+		for i := range infoCIDRs {
+			cidrs = append(cidrs, &infoCIDRs[i])
 		}
 		// Coalesce CIDRs into minimum set needed for route rules
 		// This code here mirrors interfaceAdd() in cilium-cni/interface.go
@@ -220,9 +234,10 @@ func Delete(ip net.IP, compat bool) error {
 		// In CRD-based IPAM, when an IP is unassigned from the CiliumNode, we delete this route
 		// to avoid blackholing traffic to this IP if it gets reassigned to another node
 		if err := netlink.RouteReplace(&netlink.Route{
-			Dst:   &ipWithMask,
-			Table: route.MainTable,
-			Type:  unix.RTN_UNREACHABLE,
+			Dst:    &ipWithMask,
+			Table:  route.MainTable,
+			Type:   unix.RTN_UNREACHABLE,
+			Family: family,
 		}); err != nil {
 			return fmt.Errorf("unable to add unreachable route for ip %s: %w", ipWithMask.String(), err)
 		}
@@ -270,7 +285,12 @@ func RetrieveIfaceNameFromMAC(mac string) (string, error) {
 }
 
 func deleteRule(r route.Rule) error {
-	rules, err := route.ListRules(netlink.FAMILY_V4, &r)
+	family := netlink.FAMILY_V4
+	if r.From != nil && r.From.IP.To16() != nil {
+		family = netlink.FAMILY_V6
+	}
+
+	rules, err := route.ListRules(family, &r)
 	if err != nil {
 		return err
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/defaults"
+	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
@@ -69,7 +70,7 @@ type addresses struct {
 }
 
 type RouterInfo interface {
-	GetIPv4CIDRs() []net.IPNet
+	GetCIDRs() []net.IPNet
 	GetMac() mac.MAC
 	GetInterfaceNumber() int
 }
@@ -436,11 +437,19 @@ func AutoComplete() error {
 	InitDefaultPrefix(option.Config.DirectRoutingDevice)
 
 	if option.Config.EnableIPv6 && addrs.ipv6AllocRange == nil {
-		return fmt.Errorf("IPv6 allocation CIDR is not configured. Please specificy --%s", option.IPv6Range)
+		// in ENI mode, we do not leverage this CIDR block
+		if option.Config.IPAM == ipamOption.IPAMENI {
+			return nil
+		}
+		return fmt.Errorf("IPv6 allocation CIDR is not configured. Please specify --%s", option.IPv6Range)
 	}
 
 	if option.Config.EnableIPv4 && addrs.ipv4AllocRange == nil {
-		return fmt.Errorf("IPv4 allocation CIDR is not configured. Please specificy --%s", option.IPv4Range)
+		// in ENI mode, we do not leverage this CIDR block
+		if option.Config.IPAM == ipamOption.IPAMENI {
+			return nil
+		}
+		return fmt.Errorf("IPv4 allocation CIDR is not configured. Please specify --%s", option.IPv4Range)
 	}
 
 	return nil
@@ -529,7 +538,7 @@ func chooseHostIPsToRestore(ipv6 bool, fromK8s, fromFS net.IP, cidrs []*cidr.CID
 	}
 
 	for _, cidr := range cidrs {
-		if cidr != nil && cidr.Contains(ip) {
+		if cidr != nil && cidr.String() != "" && cidr.Contains(ip) {
 			return
 		}
 	}
@@ -634,17 +643,23 @@ func GetNodeAddressing() *models.NodeAddressing {
 
 	if option.Config.EnableIPv6 {
 		a.IPV6 = &models.NodeAddressingElement{
-			Enabled:    option.Config.EnableIPv6,
-			IP:         GetIPv6Router().String(),
-			AllocRange: GetIPv6AllocRange().String(),
+			Enabled: option.Config.EnableIPv6,
+			IP:      GetIPv6Router().String(),
+		}
+
+		if allocRange := GetIPv6AllocRange(); allocRange != nil {
+			a.IPV6.AllocRange = allocRange.String()
 		}
 	}
 
 	if option.Config.EnableIPv4 {
 		a.IPV4 = &models.NodeAddressingElement{
-			Enabled:    option.Config.EnableIPv4,
-			IP:         GetInternalIPv4Router().String(),
-			AllocRange: GetIPv4AllocRange().String(),
+			Enabled: option.Config.EnableIPv4,
+			IP:      GetInternalIPv4Router().String(),
+		}
+
+		if allocRange := GetIPv4AllocRange(); allocRange != nil {
+			a.IPV4.AllocRange = allocRange.String()
 		}
 	}
 
