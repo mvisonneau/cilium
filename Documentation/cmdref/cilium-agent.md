@@ -101,6 +101,7 @@ cilium-agent [flags]
       --enable-cilium-endpoint-slice                              Enable the CiliumEndpointSlice watcher in place of the CiliumEndpoint watcher (beta)
       --enable-cilium-health-api-server-access strings            List of cilium health API APIs which are administratively enabled. Supports '*'. (default [*])
       --enable-custom-calls                                       Enable tail call hooks for custom eBPF programs
+      --enable-drop-notify                                        Enable DropNotification on any endpoint (default true)
       --enable-encryption-strict-mode                             Enable encryption strict mode
       --enable-endpoint-health-checking                           Enable connectivity health checking between virtual endpoints (default true)
       --enable-endpoint-routes                                    Use per endpoint routes instead of routing via cilium_host
@@ -144,12 +145,14 @@ cilium-agent [flags]
       --enable-node-port                                          Enable NodePort type services by Cilium
       --enable-pmtu-discovery                                     Enable path MTU discovery to send ICMP fragmentation-needed replies to the client
       --enable-policy string                                      Enable policy enforcement (default "default")
+      --enable-policy-verdict-notify                              Enable PolicyVerdictNotification on any endpoint (default true)
       --enable-recorder                                           Enable BPF datapath pcap recorder
       --enable-runtime-device-detection                           Enable runtime device detection and datapath reconfiguration (experimental)
       --enable-sctp                                               Enable SCTP support (beta)
       --enable-service-topology                                   Enable support for service topology aware hints
       --enable-session-affinity                                   Enable support for service session affinity
       --enable-svc-source-range-check                             Enable check of service source ranges (currently, only for LoadBalancer) (default true)
+      --enable-trace-notify                                       Enable TraceNotification on any endpoint (default true)
       --enable-tracing                                            Enable tracing while determining policy (debugging)
       --enable-unreachable-routes                                 Add unreachable routes on pod deletion
       --enable-vtep                                               Enable  VXLAN Tunnel Endpoint (VTEP) Integration (beta)
